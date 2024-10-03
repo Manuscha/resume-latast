@@ -1,0 +1,2415 @@
+const express = require("express");
+const _ = require("lodash");
+const collect = require("collect.js");
+const path = require("path");
+const bytes = require("bytes");
+const shelljs = require("shelljs");
+const router = express.Router();
+const seq = require("../../db");
+const {
+    Parser
+} = require("json2csv");
+var iconv = require("iconv-lite");
+const projectController = require("../../controller/projectController");
+const permission = require("../../utils/permission");
+const traineeDir = path.resolve(__dirname, "../data/project/traine");
+const help = require("../../utils/helpers");
+const helpers = require("../../utils/helpers");
+const report = require("../../controller/reportController");
+const Trainee = seq.models.ml_project_trainee;
+const Media = seq.models.ml_media;
+const ProjectCourseGen = seq.models.ml_project_course_gen;
+const User = seq.models.ml_user;
+const ProjectCourse = seq.models.ml_project_course;
+const ProjectTaragetScreening =
+    seq.models.ml_project_target_qualification_screening;
+
+router.all("/get", permission(), async function (req, res, next) {
+    try {
+        var params = req.body;
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname;
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        var projectList = helpers
+            .query("ml_project_trainee")
+            .where("status", ["approved", "finished"]);
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            projectList.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            projectList.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        if (params.projectId) projectList.where("projectId", params.projectId);
+
+        // if (params.status)
+        //     projectList.where('status', params.status)
+
+        projectList = await projectList
+            .belongsTo("ml_user", {
+                foreignKey: "userId",
+                as: "user",
+                required: false,
+                select: ["name", "lastname", "empCode", "id"],
+                hasOne: [{
+                    ml_organization_user: {
+                        foreignKey: "userId",
+                        as: "orgUser",
+                        required: false,
+                        select: ["groupId"],
+                        where: {
+                            isAdmin: "false"
+                        },
+                        belongsTo: {
+                            ml_organization_group: {
+                                foreignKey: "groupId",
+                                as: "group",
+                                require: false,
+                                select: ["name"]
+                            }
+                        }
+                    }
+                }]
+            })
+            .hasMany("ml_classroom_trainee", {
+                foreignKey: "userId",
+                as: "trainee",
+                sourceKey: "userId",
+                required: false,
+                hasMany: [{
+                    ml_ex_log: {
+                        foreignKey: "classroomTraineeId",
+                        as: "traineelog",
+                        required: false,
+                        belongsTo: {
+                            ml_classroom_trainee: {
+                                foreignKey: "classroomTraineeId",
+                                as: "classroomTrainee",
+                                required: false,
+                                belongsTo: {
+                                    ml_classroom: {
+                                        foreignKey: "classroomId",
+                                        as: "classroom",
+                                        required: false,
+                                        belongsTo: {
+                                            ml_project_course_subject: {
+                                                foreignKey: "projectCourseSubjectId",
+                                                as: "subject",
+                                                required: false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }]
+            });
+        if (whereEmpCode || whereName || whereLastname) {
+            listoutProject.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        projectList = await projectList.params(req.body);
+        projectList = await projectList.toJson();
+
+        for (let progject of projectList) {
+            for (let projectTrainee of progject.trainee) {
+                let groupType = collect(projectTrainee.traineelog)
+                    .map(function (row) {
+                        row.subject = _.result(
+                            row,
+                            "classroomTrainee.classroom.subject.name",
+                            ""
+                        );
+                        delete row.classroomTrainee;
+                        row.examType = !help.empty(row.examType) ? row.examType : "test";
+                        return row;
+                    })
+                    .groupBy("examType")
+                    .map(row => {
+                        let data = collect(row.items).map(item => {
+                            item.score = !help.empty(item.score) ? item.score : 0;
+                            item.maxScore = !help.empty(item.maxScore) ? item.maxScore : 0;
+                            item.avg =
+                                (help.getNumber(item.score) * 100) /
+                                help.getNumber(item.maxScore) || 0;
+
+                            if (
+                                item.examType == "pretestPractice" &&
+                                item.resultPractice == "passed"
+                            ) {
+                                item.score = 100;
+                            }
+                            if (
+                                item.examType == "testPractice" &&
+                                item.resultPractice == "passed"
+                            ) {
+                                item.score = 100;
+                            }
+
+                            return item;
+                        });
+
+                        // .groupBy("subject").map(sub => {
+                        //     let data = JSON.parse(JSON.stringify(_.max(sub.items, 'avg')))
+                        //     // console.log(data);
+                        //     return data
+                        // }).values().all()
+                        data = data.all();
+                        return data;
+                    })
+                    .all();
+                // groupType.test = collect(groupType.test).max('avg')
+
+                projectTrainee.traineelog = groupType;
+                // console.log(groupType);
+
+                let countTest = 0;
+                let countPretest = 0;
+                let countpretestPractice = 0;
+                let counttestPractice = 0;
+                let sumTest = 0;
+                let sumPretest = 0;
+                let sumPretestPractice = 0;
+                let sumTestPractice = 0;
+                let avgTest = 0;
+                let avgPretest = 0;
+                let avgpretestPractice = 0;
+                let avgtestPractice = 0;
+                let scoreSumTests = 0;
+                let scoreSumPretests = 0;
+
+                groupType.countTest = _.size(groupType.test);
+                groupType.countPretest = _.size(groupType.pretest);
+                groupType.countpretestPractice = _.size(groupType.pretestPractice);
+                groupType.counttestPractice = _.size(groupType.testPractice);
+
+                groupType.sumTest = _.sum(
+                    help.pluck(help.get(groupType, "test", []), "score")
+                );
+                groupType.sumPretest = _.sum(
+                    help.pluck(help.get(groupType, "pretest", []), "score")
+                );
+                groupType.sumPretestPractice = _.sum(
+                    help.pluck(help.get(groupType, "pretestPractice", []), "score")
+                );
+                groupType.sumTestPractice = _.sum(
+                    help.pluck(help.get(groupType, "testPractice", []), "score")
+                );
+
+                if (groupType.countTest != 0 && groupType.sumTest != 0) {
+                    groupType.avgTest =
+                        help.getNumber(groupType.sumTest) /
+                        help.getNumber(groupType.countTest);
+                } else {
+                    groupType.avgTest = 0;
+                }
+
+                if (groupType.countPretest != 0 && groupType.sumPretest != 0) {
+                    groupType.avgPretest =
+                        help.getNumber(groupType.sumPretest) /
+                        help.getNumber(groupType.countPretest);
+                } else {
+                    groupType.avgPretest = 0;
+                }
+
+                if (
+                    groupType.countpretestPractice != 0 &&
+                    groupType.sumPretestPractice != 0
+                ) {
+                    groupType.avgpretestPractice =
+                        help.getNumber(groupType.sumPretestPractice) /
+                        help.getNumber(groupType.countpretestPractice);
+                } else {
+                    groupType.avgpretestPractice = 0;
+                }
+
+                if (
+                    groupType.counttestPractice != 0 &&
+                    groupType.sumTestPractice != 0
+                ) {
+                    groupType.avgtestPractice =
+                        help.getNumber(groupType.sumTestPractice) /
+                        help.getNumber(groupType.counttestPractice);
+                } else {
+                    groupType.avgtestPractice = 0;
+                }
+
+                if (groupType.avgTest != 0 && groupType.avgtestPractice != 0) {
+                    groupType.scoreSumTests =
+                        help.getNumber(groupType.avgTest) +
+                        help.getNumber(groupType.avgtestPractice) / 2;
+                } else if (groupType.avgTest != 0 && groupType.avgtestPractice == 0) {
+                    groupType.scoreSumTests = groupType.avgTest;
+                } else if (groupType.avgtestPractice != 0 && groupType.avgTest == 0) {
+                    groupType.scoreSumTests = groupType.avgtestPractice;
+                } else {
+                    groupType.scoreSumTests = 0;
+                }
+
+                if (groupType.avgPretest != 0 && groupType.avgpretestPractice) {
+                    groupType.scoreSumPretests =
+                        (help.getNumber(groupType.avgPretest) +
+                            help.getNumber(groupType.avgpretestPractice)) /
+                        2;
+                } else if (
+                    groupType.avgPretest != 0 &&
+                    groupType.avgpretestPractice == 0
+                ) {
+                    groupType.scoreSumPretests = groupType.avgPretest;
+                } else if (
+                    groupType.avgpretestPractice != 0 &&
+                    groupType.avgPretest == 0
+                ) {
+                    groupType.scoreSumPretests = groupType.avgpretestPractice;
+                } else {
+                    groupType.scoreSumPretests = 0;
+                }
+
+                // console.log(JSON.stringify(groupType.pretest, null, 1));
+            }
+
+            if (progject.userId) {
+                progject.Org = {
+                    ...progject.Org,
+                    ...(await User.getPosition(progject.userId))
+                };
+
+                progject.Org.Group = 0;
+                progject.Org.team = 0;
+
+                let code = progject.Org.group.code;
+                help.filter(_.split(code, "."))[1];
+                var listGroup = help.filter(_.split(code, "."))
+                help.filter(_.split(code, "."))[2];
+
+                let group = await help
+                    .query("ml_organization_group")
+                    .where("id", listGroup)
+                    .select(["id", "isBrance", "name"])
+                    .toJson();
+                listGroup = _.map(listGroup, (name) => {
+                    return collect(group).filter(item => item.id == name).first();
+                })
+                var findIndexGroup = collect(listGroup).reverse().filter(item => item.isBrance == 'true').first();
+                var findIndexTeam = _.last(listGroup).isBrance == 'false' ? _.last(listGroup) : {}
+                progject.Org.Group = help.get(findIndexGroup, 'name', '-')
+                progject.Org.team = help.get(findIndexTeam, 'name', '-')
+
+            }
+
+        }
+
+        projectList.forEach(listUser => {
+            (listUser.name = listUser.user.name),
+                (listUser.lastname = listUser.user.lastname),
+                (listUser.empCode = listUser.user.empCode);
+            listUser.group = _.result(listUser.Org, "Group", "");
+            listUser.position = !help.empty(
+                _.result(listUser.Org, "position.name", "")
+            ) ?
+                _.result(listUser.Org, "position.name", "") :
+                "-";
+            listUser.rank = !help.empty(_.result(listUser.Org, "rank", "")) ?
+                _.result(listUser.Org, "rank", "") :
+                "-";
+            listUser.team = _.result(listUser.Org, "team", "");
+            delete listUser.user;
+            delete listUser.Org;
+        });
+
+        projectList = _.map(projectList, project => {
+            project.score = 0;
+            project.maxScore = 0;
+            project.checkinCount = 0;
+            project.avg = 0;
+            if (!help.empty(project.trainee)) {
+                var trainee = _.map(project.trainee, trainee => {
+                    if (!help.empty(trainee.checkinData)) {
+                        if (help.testJSON(trainee.checkinData)) {
+                            trainee.checkinData = JSON.parse(trainee.checkinData);
+                        }
+                    } else {
+                        trainee.checkinData = [];
+                    }
+                    trainee.score = 0;
+                    trainee.maxScore = 0;
+                    if (!help.empty(trainee.traineelog)) {
+                        var traineelog = {};
+                        trainee.score = _.sum(help.pluck(trainee.traineelog, "score"));
+                        trainee.maxScore = _.sum(
+                            help.pluck(trainee.traineelog, "maxScore")
+                        );
+
+                        // return trainee.traineelog
+                    }
+                    // trainee.score = (help.pluck(_.result(trainee, 'traineelog', []), 'score'))
+                    // trainee.score = _.chain(trainee).result('traineelog', []).sumBy('score')
+                    trainee.checkinCount = collect(trainee.checkinData)
+                        .whereIn("status", ["notlate", "late"])
+                        .count();
+                    trainee.checkinTotal = collect(trainee.checkinData).count();
+                    return trainee;
+                });
+                project.score = _.sum(help.pluck(trainee, "score"));
+                project.maxScore = _.sum(help.pluck(trainee, "maxScore"));
+                project.checkinCount = _.sum(help.pluck(trainee, "checkinCount"));
+                project.checkinTotal = _.sum(help.pluck(trainee, "checkinTotal"));
+                project.avg =
+                    (help.getNumber(project.score) * 100) /
+                    help.getNumber(project.maxScore);
+                project.avgLearning =
+                    (help.getNumber(project.checkinCount) * 100) /
+                    help.getNumber(project.checkinTotal);
+            }
+            return project;
+        });
+
+        // projectList = collect(projectList)
+        //     .map(project => {
+        //         let pretest = project.trainee;
+        //         pretest = collect(pretest)
+        //             .pluck("traineelog")
+        //             .collapse()
+        //             .first();
+        //         project.pretest = _.result(pretest, "pretest", []);
+        //         project.test = _.result(pretest, "test", []);
+        //         return project;
+        //     })
+        //     .all();
+        res.json(projectList);
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/update", async function (req, res, next) {
+    try {
+        const projectCourseId = req.body.projectCourseId;
+        const projectId = req.body.projectId;
+        const projectType = req.body.projectType;
+        const userId = req.body.userId;
+        const isAssign = req.body.isAssign;
+        const selected = req.body.selected;
+        const status = req.body.status;
+        const evaluationScore = req.body.evaluationScore;
+        const isOnline = req.body.isOnline;
+        const gen = req.body.gen;
+        const sort = req.body.sort;
+        const reason = req.body.reason;
+        if (projectCourseId == null)
+            return res.status(400).send("Require projectCourseId");
+        if (gen == null) return res.status(400).send("Require gen");
+
+        var findProjectCourseGen = await ProjectCourseGen.findOne({
+            where: {
+                projectCourseId: projectCourseId,
+                gen: gen
+            }
+        });
+        await Trainee.update({
+            projectCourseGenId: findProjectCourseGen.id,
+            projectType,
+            isAssign,
+            selected,
+            status,
+            evaluationScore,
+            isOnline,
+            sort,
+            reason
+        }, {
+            where: {
+                userId,
+                projectId
+            }
+        });
+
+        res.send("OK");
+        req.log("update trainee", {
+            trainee: req.body
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/add-trainee", async function (req, res, next) {
+    try {
+        var params = req.body;
+        var projectId = params.projectId;
+        var projectType = params.projectType;
+        var projectCourseId = params.projectCourseId;
+        var gen = params.gen;
+        var status = params.status;
+        var userId = params.userId || req.session.passport.user.id;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        if (projectType === void 0)
+            return res.status(400).send("Require projectType");
+        if (projectCourseId === void 0)
+            return res.status(400).send("Require projectCourseId");
+        if (gen === void 0) return res.status(400).send("Require gen");
+
+        if (projectCourseId && gen != null) {
+            var findProjectCourseGen = await ProjectCourseGen.findOne({
+                where: {
+                    projectCourseId,
+                    gen
+                }
+            });
+            if (!findProjectCourseGen)
+                return res.status(400).send("No Information projectCourseId && gen ");
+        }
+
+        var findTrainee = await Trainee.findOne({
+            where: {
+                projectId,
+                projectType,
+                userId,
+                projectCourseGenId: findProjectCourseGen.id
+            }
+        });
+
+        if (!findTrainee) {
+            if (status != null) {
+                await Trainee.create({
+                    projectId,
+                    projectType,
+                    userId,
+                    projectCourseGenId: findProjectCourseGen.id,
+                    status
+                }, {
+                    ignoreDuplicates: true
+                });
+            } else if (status == null) {
+                var addTrainee = await Trainee.create({
+                    projectId,
+                    projectType,
+                    userId,
+                    projectCourseGenId: findProjectCourseGen.id
+                }, {
+                    ignoreDuplicates: true
+                });
+            }
+        } else {
+            return res
+                .status(400)
+                .send(
+                    "You have repeat registered  the course and gen of this project."
+                );
+        }
+
+        res.send("OK");
+
+        req.log("add trainee", {
+            trainee: {
+                id: addTrainee
+            }
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/add", permission(), async function (req, res, next) {
+    try {
+        let projectId = req.body.projectId;
+        let trainee = req.body.trainee;
+        if (!projectId) return res.status(400).send("Require projectId");
+        if (!trainee) return res.status(400).send("Require trainee");
+
+        trainee.forEach(d => (d.projectId = projectId));
+        res.json(
+            await ProjectBudget.bulkCreate(trainee, {
+                returning: true
+            })
+        );
+
+        req.log("add trainee", {
+            trainee: {
+                id: projectId,
+                trainee: trainee
+            }
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/deleteTrainee", async function (req, res, next) {
+    try {
+        var projectId = req.body.projectId;
+        var userId = req.body.userId;
+        await Trainee.destroy({
+            where: {
+                projectId: projectId,
+                userId
+            }
+        });
+        res.send("OK");
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/remove", permission(), async function (req, res, next) {
+    try {
+        let traineeId = req.body.traineeId;
+        if (!traineeId) return res.status(400).send("Require traineeId");
+        if (!Array.isArray(traineeId)) traineeId = [traineeId];
+
+        res.json(
+            await ProjectBudget.destroy({
+                where: {
+                    id: {
+                        $in: traineeId
+                    }
+                }
+            })
+        );
+        req.log("remove trainee", {
+            trainee: {
+                traineeId: traineeId
+            }
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/selectStatus-trainee", async function (req, res, next) {
+    try {
+        const projectId = req.body.projectId;
+        const userId = req.body.userId;
+        const selected = req.body.selected;
+        const status = req.body.status;
+        const reason = req.body.reason;
+        var sort = _.result(req.body, "sort", 0);
+
+        if (projectId === void 0) return res.send("Require projectId");
+        if (userId === void 0) return res.send("Require userId");
+
+        if (projectId || userId) {
+            let findSelected = await Trainee.findOne({
+                where: {
+                    projectId,
+                    userId
+                }
+            });
+            if (!findSelected) {
+                return res.send("projectId or userId is not exist");
+            }
+        }
+
+        if (status == "rejected") {
+            let file = _.get(req, "files.file");
+
+            if (file == null) {
+                return res.send("Require file");
+            }
+            var traineeFind = await Trainee.findOne({
+                where: {
+                    projectId,
+                    userId
+                }
+            });
+            let mediaId = await help.next("ml_media");
+            let p = path.resolve(
+                __dirname,
+                "../../data/project/trainee",
+                mediaId + "." + file.extension
+            );
+            // let p = path.resolve(__dirname, '../../data/project/trainee', traineeFind.id + '-' + (file.name).replace(`.${file.extension}`, '') + '.' + file.extension)
+            shelljs.mkdir("-p", path.dirname(p));
+            file.mv(p);
+            var filename = help.get(
+                req.body,
+                "filename",
+                file.name.replace(`.${file.extension}`, "") + "." + file.extension
+            );
+            await Media.create({
+                extension: file.extension,
+                type: "file",
+                refId: traineeFind.id,
+                refMenu: "trainee",
+                mediaDetail: "rejected",
+                size: bytes(file.size),
+                filename: filename
+            });
+        }
+        var traineeCount = await help
+            .query("ml_project_trainee")
+            .where({
+                projectId,
+                selected
+            })
+            .count();
+        if (help.empty(sort)) {
+            sort = traineeCount + 1;
+        } else {
+            var traineeData = await help
+                .query("ml_project_trainee")
+                .where({
+                    projectId,
+                    selected
+                })
+                .first();
+
+            // let a = traineeData.sort
+            let a = _.result(traineeData, "sort", 0);
+
+            if (sort < a) {
+                await help
+                    .query("ml_project_trainee")
+                    .where({
+                        projectId,
+                        selected
+                    })
+                    .where("sort", "--", [sort, a])
+                    .increment("sort");
+            } else {
+                await help
+                    .query("ml_project_trainee")
+                    .where({
+                        projectId,
+                        selected
+                    })
+                    .where("sort", "--", [a, sort])
+                    .decrement("sort");
+            }
+        }
+
+        await Trainee.update({
+            selected: selected,
+            status,
+            sort,
+            reason
+        }, {
+            where: {
+                projectId: projectId,
+                userId: userId
+            },
+            raw: true
+        });
+
+        return res.send("Sucsecc");
+    } catch (e) {
+        next(e);
+    }
+});
+//list ผู้สมัคร
+router.all("/list-applicant", async function (req, res, next) {
+    try {
+        var fullUrl = req.protocol + "://" + req.get("host");
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname,
+            $path = "data/project/trainee/register";
+        const projectCourseId = req._body("projectCourseId", Number);
+        const gen = req._body("gen", Number);
+        const projectId = req._body("projectId", Number);
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        // if (projectCourseGenId === void 0) return res.status(400).send('Require projectCourseGenId')
+        // const order = req._body('order', Array, ['empCode', 'asc'])
+
+        // let projectIdFind = await Trainee.findOne({
+        //   where: {
+        //     projectId
+        //   }
+        // });
+        // if (!projectIdFind) return res.status(400).send("projectId is not exist");
+
+        var list = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("isOnline", "true")
+            .select([
+                "userId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description",
+                "sort",
+                "reason"
+            ]);
+        list.where("status", "pending");
+        if (!help.empty(projectCourseId) && !help.empty(gen)) {
+            list.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: {
+                    projectCourseId,
+                    gen
+                }
+                // where: help.only(req.input, ['projectCourseId', 'gen'])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            list.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+        list = await list.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"],
+            hasOne: [{
+                ml_organization_user: {
+                    foreignKey: "userId",
+                    as: "orgUser",
+                    required: false,
+                    select: ["groupId"],
+                    where: {
+                        isAdmin: "false"
+                    },
+                    belongsTo: {
+                        ml_organization_group: {
+                            foreignKey: "groupId",
+                            as: "group",
+                            require: false,
+                            select: ["name"]
+                        }
+                    }
+                }
+            }]
+        });
+        list.hasOne("ml_media", {
+            foreignKey: "refId",
+            as: "file",
+            required: false,
+            where: {
+                refMenu: "trainee",
+                mediaDetail: "register"
+            }
+        });
+        if (whereEmpCode || whereName || whereLastname) {
+            list.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        list = await list.toJson();
+
+        for (let trainee of list) {
+            if (trainee.userId) {
+                trainee.user = {
+                    ...trainee.user,
+                    ...(await User.getPosition(trainee.userId))
+                };
+
+                trainee.user.Group = 0;
+                trainee.user.team = 0;
+
+                let code = trainee.user.group.code;
+                var findIndexGroup = help.filter(_.split(code, "."))[1];
+                var findIndexTeam = help.filter(_.split(code, "."))[2];
+
+                if (findIndexGroup != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexGroup)
+                        .select(["name"])
+                        .first();
+                    trainee.user.Group = a.name;
+                }
+
+                if (findIndexTeam != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexTeam)
+                        .select(["name"])
+                        .first();
+                    trainee.user.team = a.name;
+                }
+
+                if (findIndexTeam === undefined) {
+                    trainee.user.team = "-";
+                }
+            }
+        }
+
+        var count = (
+            await seq.query(`SELECT
+                        userId,
+                        COUNT(*) AS count
+                        FROM
+                        ml_project_trainee
+                        GROUP BY
+                        userId
+                        `)
+        )[0];
+
+        var limitedJoinProject = await help
+            .query("ml_project_config")
+            .select(["minPerYear"])
+            .toJson();
+        list = _.map(list, data => {
+            data.empCode = data.User.empCode;
+            data.name = data.User.name;
+            data.lastname = data.User.lastname;
+            data.group = !help.empty(_.result(data.user, "Group", "")) ? _.result(data.user, "Group", "") : '-';
+            data.position = !help.empty(_.result(data.user, "position.name", "")) ? _.result(data.user, "position.name", "") : "-";
+            data.rank = !help.empty(_.result(data.user, "rank", "")) ? _.result(data.user, "rank", "") : "-";
+            data.team = _.result(data.user, "team", "");
+            data.numParticipants = count.find(c => c.userId == data.userId).count;
+            data.link = "";
+            data.filename = "";
+            if (!help.empty(data.file)) {
+                let extension = data.file.extension;
+                let path = _.join(
+                    [$path, `${data.file.id}.${extension}`],
+                    [(separator = "/")]
+                );
+                data.file.path = `${$path}/${data.file.id}.${extension}`;
+                data.link = `${fullUrl}/api/download/${path}`;
+                let _path = help.path_info(data.link);
+                data.filename = help.get(data, "file.filename", _path.filename);
+                data.filename = help.strLast(data.filename, `.${extension}`);
+            }
+            //   delete data.User;
+            //   delete data.user;
+            return data;
+        });
+        // })
+        //*/
+        {
+            /*
+                                    var list = ((await seq.query(`SELECT
+                                    a.*, b.count,
+                                    (
+                                        SELECT
+                                            minPerYear
+                                        FROM
+                                            ml_project_config
+                                        LIMIT 1
+                                    ) AS minPerYear
+                                FROM
+                                    (
+                                        SELECT
+                                            ml_user.empCode,
+                                            ml_user.\`name\`,
+                                            ml_user.lastname,
+                                            ml_project_trainee.\`status\`,
+                                            ml_project_trainee.evaluationScore,
+                                            ml_project_trainee.isOnline,
+                                            ml_project_trainee.createdAt,
+                                            ml_project_trainee.updatedAt,
+                                            ml_user.id AS userId
+                                        FROM
+                                            ml_project_trainee
+                                        INNER JOIN ml_user ON ml_project_trainee.userId = ml_user.id
+                                        WHERE
+                                            \`isOnline\` = 'true'
+                                        AND ml_project_trainee.\`status\` = 'pending'
+                                        AND ml_project_trainee.projectId = ${projectId}
+                                    ) AS a
+                                INNER JOIN (
+                                    SELECT
+                                        userId,
+                                        COUNT(*) AS count
+                                    FROM
+                                        ml_project_trainee
+                                    GROUP BY
+                                        userId
+                                ) AS b ON a.userId = b.userId
+                                ORDER BY ${order[0]} ${order[1] || ''}`)))[0]
+                                    //*/
+        }
+        return res.json({
+            list,
+            limitedJoinProject
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+//list ผู้คัดกรอง  'ทั้งหมดไม่แบ่งตัวจริงตัวสำรองและไม่ผ่าน'
+router.all("/list-screenerReal", async function (req, res, next) {
+    try {
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname;
+        const projectCourseGenId = req.body.projectCourseGenId;
+        const projectId = req.body.projectId;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+
+        const order = req._body("order", Array, ["order", "desc"]);
+
+        let projectIdFind = await Trainee.findOne({
+            where: {
+                projectId
+            }
+        });
+        if (!projectIdFind) {
+            return res.status(400).send("projectId is not exist");
+        }
+
+        var list = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .select([
+                "userId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description",
+                "sort",
+                "reason"
+            ])
+            .where("selected", ["sub", "real", "not passed"]);
+        list.where("status", ["screened", "approved"]);
+
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            list.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            list.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        list = await list.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"],
+            hasOne: [{
+                ml_organization_user: {
+                    foreignKey: "userId",
+                    as: "orgUser",
+                    required: false,
+                    select: ["groupId"],
+                    where: {
+                        isAdmin: "false"
+                    },
+                    belongsTo: {
+                        ml_organization_group: {
+                            foreignKey: "groupId",
+                            as: "group",
+                            require: false,
+                            select: ["name"]
+                        }
+                    }
+                }
+            }]
+        });
+        if (whereEmpCode || whereName || whereLastname) {
+            list.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        list = await list.toJson();
+
+        for (let trainee of list) {
+            if (trainee.userId) {
+                trainee.user = {
+                    ...trainee.user,
+                    ...(await User.getPosition(trainee.userId))
+                };
+
+                trainee.user.Group = 0;
+                trainee.user.team = 0;
+
+                let code = trainee.user.group.code;
+                var findIndexGroup = help.filter(_.split(code, "."))[1];
+                var findIndexTeam = help.filter(_.split(code, "."))[2];
+
+                if (findIndexGroup != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexGroup)
+                        .select(["name"])
+                        .first();
+                    trainee.user.Group = a.name;
+                } else if (findIndexGroup == undefined) {
+                    trainee.user.Group = '-'
+                }
+
+                if (findIndexTeam != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexTeam)
+                        .select(["name"])
+                        .first();
+                    trainee.user.team = a.name;
+                }
+
+                if (findIndexTeam === undefined) {
+                    trainee.user.team = "-";
+                }
+            }
+        }
+
+        var count = (
+            await seq.query(`SELECT
+                userId,
+                COUNT(*) AS count
+                FROM
+                ml_project_trainee
+                GROUP BY
+                userId
+                `)
+        )[0];
+
+        var limitedJoinProject = await help
+            .query("ml_project_config")
+            .select(["minPerYear"])
+            .toJson();
+
+        list.forEach(d => {
+            d.empCode = d.User.empCode;
+            d.name = d.User.name;
+            d.lastname = d.User.lastname;
+            d.group = _.result(d.user, "Group", "")
+            d.position = !help.empty(_.result(d.user, "position.name", "")) ?
+                _.result(d.user, "position.name", "") :
+                "-";
+            d.rank = !help.empty(_.result(d.user, "rank", "")) ?
+                _.result(d.user, "rank", "") :
+                "-";
+            d.team = _.result(d.user, "team", "");
+            d.numParticipants = count.find(c => c.userId == d.userId).count;
+            delete d.User;
+            delete d.user;
+        });
+        //*/
+        {
+            /*
+                        var listLifelike = ((
+                            await seq.query(`SELECT
+                                a.*, b.count,
+                                (
+                                    SELECT
+                                        minPerYear
+                                    FROM
+                                        ml_project_config
+                                    LIMIT 1
+                                ) AS minPerYear
+                            FROM
+                                (
+                                    SELECT
+                                    ml_user.id AS userId,
+                                    ml_user.empCode,
+                                    ml_user.\`name\`,
+                                    ml_user.lastname,
+                                    ml_project_trainee.\`status\`,
+                                    ml_project_trainee.evaluationScore,
+                                    ml_project_trainee.isOnline,
+                                    ml_project_trainee.selected,
+                                    ml_project_trainee.createdAt,
+                                    ml_project_trainee.updatedAt
+                                FROM
+                                    ml_project_trainee
+                                INNER JOIN ml_user ON ml_project_trainee.userId = ml_user.id
+                            WHERE
+                                        \`isOnline\` = 'false'
+                                    AND ml_project_trainee.\`status\` = 'pending'
+                                AND ml_project_trainee.\`selected\` = 'real'
+                                    AND ml_project_trainee.projectId = ${projectId}
+                                ) AS a
+                            INNER JOIN (
+                                SELECT
+                                    userId,
+                                    COUNT(*) AS count
+                                FROM
+                                    ml_project_trainee
+                                GROUP BY
+                                    userId
+                            ) AS b ON a.userId = b.userId
+                            ORDER BY ${order[0]} ${order[1] || ''} `)))[0]
+
+                        //*/
+        }
+
+        list = _.chain(list)
+            .map((row, key) => {
+                if (row.selected == "real") {
+                    row.num = 1;
+                } else if (row.selected == "sub") {
+                    row.num = 2;
+                } else {
+                    row.num = 3;
+                }
+                return row;
+            })
+            .sortBy(["num", "sort"]);
+        return res.json({
+            list,
+            limitedJoinProject
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/list-screenerSub", async function (req, res, next) {
+    try {
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname;
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        const projectId = req.body.projectId;
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+
+        const order = req._body("order", Array, ["order", "asc"]);
+
+        let projectIdFind = await Trainee.findOne({
+            where: {
+                projectId
+            }
+        });
+        if (!projectIdFind) {
+            return res.status(400).send("projectId is not exist");
+        }
+
+        var listSubstitute = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("isOnline", "false")
+            .where("status", "pending")
+            .where("selected", "sub")
+            .select([
+                "userId",
+                "projectId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description"
+            ]);
+
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            listSubstitute.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            listSubstitute.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        listSubstitute = await listSubstitute.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"]
+        });
+
+        if (whereEmpCode || whereName || whereLastname) {
+            listSubstitute.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        listSubstitute = await listSubstitute.toJson();
+
+        var count = (
+            await seq.query(`SELECT
+            userId,
+            COUNT(*) AS count
+            FROM
+            ml_project_trainee
+            GROUP BY
+            userId
+            `)
+        )[0];
+
+        var limitedJoinProject = await help
+            .query("ml_project_config")
+            .select(["minPerYear"])
+            .toJson();
+
+        listSubstitute.forEach(d => {
+            d.empCode = d.User.empCode;
+            d.name = d.User.name;
+            d.lastname = d.User.lastname;
+            d.group = d.User.orgUser.group.name;
+            d.numParticipants = count.find(c => c.userId == d.userId).count;
+            delete d.User;
+        });
+
+        {
+            /*
+                         var listSubstitute = ((
+                                    await seq.query(`SELECT
+                                a.*, b.count,
+                                (
+                                    SELECT
+                                        minPerYear
+                                    FROM
+                                        ml_project_config
+                                    LIMIT 1
+                                ) AS minPerYear
+                            FROM
+                                (
+                                    SELECT
+                        			ml_user.id AS userId,
+                        			ml_user.empCode,
+                        			ml_user.\`name\`,
+                        			ml_user.lastname,
+                        			ml_project_trainee.\`status\`,
+                        			ml_project_trainee.evaluationScore,
+                        			ml_project_trainee.isOnline,
+                        			ml_project_trainee.selected,
+                        			ml_project_trainee.createdAt,
+                        			ml_project_trainee.updatedAt
+                        		FROM
+                        			ml_project_trainee
+                        		INNER JOIN ml_user ON ml_project_trainee.userId = ml_user.id
+                        	WHERE
+                          			\`isOnline\` = 'false'
+                         		AND ml_project_trainee.\`status\` = 'pending'
+                                AND ml_project_trainee.\`selected\` = 'sub'
+                                    AND ml_project_trainee.projectId = ${projectId}
+                                ) AS a
+                            INNER JOIN (
+                                SELECT
+                                    userId,
+                                    COUNT(*) AS count
+                                FROM
+                                    ml_project_trainee
+                                GROUP BY
+                                    userId
+                            ) AS b ON a.userId = b.userId
+                            ORDER BY ${order[0]} ${order[1] || ''}`)))[0]
+                        //*/
+        }
+
+        return res.json({
+            listSubstitute,
+            limitedJoinProject
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/list-screenerNot", async function (req, res, next) {
+    try {
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname;
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        const projectId = req.body.projectId;
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+
+        let order = req._body("order", Array, ["empCode", "desc"]);
+
+        let projectIdFind = await Trainee.findOne({
+            where: {
+                projectId
+            }
+        });
+        if (!projectIdFind) {
+            return res.status(400).send("projectId is not exist");
+        }
+
+        var listNotPass = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("isOnline", "false")
+            .where("status", "not passed")
+            .select([
+                "userId",
+                "projectId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description"
+            ]);
+
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            listNotPass.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            listNotPass.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        listNotPass = await listNotPass.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"]
+        });
+
+        if (whereEmpCode || whereName || whereLastname) {
+            listNotPass.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        listNotPass = await listNotPass.toJson();
+
+        var count = (
+            await seq.query(`SELECT
+        userId,
+        COUNT(*) AS count
+        FROM
+        ml_project_trainee
+        GROUP BY
+        userId`)
+        )[0];
+
+        var limitedJoinProject = await help
+            .query("ml_project_config")
+            .select(["minPerYear"])
+            .toJson();
+
+        listNotPass.forEach(d => {
+            d.empCode = d.User.empCode;
+            d.name = d.User.name;
+            d.lastname = d.User.lastname;
+            d.numParticipants = count.find(c => c.userId == d.userId).count;
+            delete d.User;
+        });
+
+        return res.json({
+            listNotPass,
+            limitedJoinProject
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/list-screenedWait", async function (req, res, next) {
+    try {
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        const projectId = req.body.projectId;
+        if (projectId == null) return res.status(400).send("Require projectId");
+        // if (projectCourseGenId == null) return res.status(400).send('Require projectCourseGenId')
+
+        var listScreened = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("status", "screened")
+            .select([
+                "userId",
+                "projectId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description"
+            ]);
+
+        // if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+        //     listScreened.belongsTo('ml_project_course_gen',
+        //         {
+        //             "foreignKey": 'projectCourseGenId', 'as': 'gen',
+        //             "required": true, "select": [],
+        //             where: help.only(req.input, ['projectCourseId', 'gen'])
+        //         })
+        // } else if (!help.empty(projectCourseGenId)) {
+        //     listScreened.where('projectCourseGenId', req.input.projectCourseGenId)
+        // }
+
+        listScreened = await listScreened
+            .belongsTo("ml_user", {
+                foreignKey: "userId",
+                as: "User",
+                required: true,
+                select: ["empCode", "name", "lastname"],
+                hasOne: [{
+                    ml_organization_user: {
+                        foreignKey: "userId",
+                        as: "Organization",
+                        require: true,
+                        select: ["rank", "groupId"],
+                        belongsTo: {
+                            ml_organization_group: {
+                                foreignKey: "groupId",
+                                as: "Group",
+                                required: true,
+                                select: ["id", "name"]
+                            }
+                        }
+                    }
+                }]
+            })
+            .toJson();
+
+        for (let listOrg of listScreened) {
+            if (listOrg.userId) {
+                listOrg.Org = {
+                    ...listOrg.Org,
+                    ...(await User.getPosition(listOrg.userId))
+                };
+
+                listOrg.Org.team = 0;
+
+                let code = listOrg.Org.group.code;
+                var findIndex = help.filter(_.split(code, "."))[2];
+
+                if (findIndex != undefined) {
+                    let team = await helpers
+                        .query("ml_organization_group")
+                        .where("id", findIndex)
+                        .select(["name"])
+                        .first();
+
+                    listOrg.Org.team = team.name;
+                }
+
+                if (findIndex === undefined) {
+                    listOrg.Org.team = "-";
+                }
+            }
+        }
+
+        listScreened.forEach(d => {
+            d.empCode = d.User.empCode;
+            d.name = d.User.name;
+            d.lastname = d.User.lastname;
+            d.group = !help.empty(_.result(d.User, "Organization.Group.name", "")) ?
+                _.result(d.User, "Organization.Group.name", "") :
+                "-";
+            d.rank = !help.empty(_.result(d.User, "Organization.Group.rank", "")) ?
+                _.result(d.User, "Organization.Group.rank", "") :
+                "-";
+            d.position =
+                _.result(d.Org, "position.name", "") != null || "" ?
+                    _.result(d.Org, "position.name", "") :
+                    "-";
+            d.team = _.result(d.Org, "team");
+            delete d.User;
+            delete d.Org;
+        });
+
+        res.json(listScreened);
+    } catch (e) {
+        next(e);
+    }
+});
+router.all("/list-outProject", async function (req, res, next) {
+    try {
+        var fullUrl = req.protocol + "://" + req.get("host");
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname,
+            $path = "data/project/trainee";
+
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        const projectId = req.body.projectId;
+        if (projectId == null) return res.status(400).send("Require projectId");
+
+        var listoutProject = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("status", "rejected")
+            .select([
+                "userId",
+                "projectId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description"
+            ]);
+
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            listoutProject.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            listoutProject.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        listoutProject.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"],
+            hasOne: [{
+                ml_organization_user: {
+                    foreignKey: "userId",
+                    as: "orgUser",
+                    required: false,
+                    select: ["groupId"],
+                    where: {
+                        isAdmin: "false"
+                    },
+                    belongsTo: {
+                        ml_organization_group: {
+                            foreignKey: "groupId",
+                            as: "group",
+                            require: false,
+                            select: ["name"]
+                        }
+                    }
+                }
+            }]
+        });
+
+        listoutProject.hasOne("ml_media", {
+            foreignKey: "refId",
+            as: "file",
+            required: false,
+            where: {
+                refMenu: "trainee"
+            }
+        });
+
+        if (whereEmpCode || whereName || whereLastname) {
+            listoutProject.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        listoutProject = await listoutProject.toJson();
+        listoutProject = _.map(listoutProject, data => {
+            data.link = "";
+            data.filename = "";
+            if (!help.empty(data.file)) {
+                let extension = data.file.extension;
+                let path = _.join(
+                    [$path, `${data.file.id}.${extension}`],
+                    [(separator = "/")]
+                );
+                data.file.path = `${$path}/${data.file.id}.${extension}`;
+                data.link = `${fullUrl}/api/download/${path}`;
+                let _path = help.path_info(data.link);
+                data.filename = help.get(data, "file.filename", _path.filename);
+                data.filename = help.strLast(data.filename, `.${extension}`);
+            }
+            return data;
+        });
+        listoutProject.forEach(listUser => {
+            (listUser.name = listUser.User.name),
+                (listUser.lastname = listUser.User.lastname),
+                (listUser.empCode = listUser.User.empCode);
+            listUser.group = _.result(listUser.User, "orgUser.group.name", "");
+            delete listUser.User;
+        });
+
+        res.json(listoutProject);
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/list-my-project", permission(), async function (req, res, next) {
+    try {
+        const userId = req.session.passport.user.id;
+        var list = await help
+            .query("ml_project")
+            .except(["createdAt", "updatedAt"])
+            .where("status", ["training", "waiting screening", "waiting register"])
+            .hasMany("ml_project_trainee", {
+                foreignKey: "projectId",
+                as: "Project",
+                required: true,
+                where: {
+                    userId: userId,
+                    status: {
+                        $in: ["pending", "approved", "screened", "registered"]
+                    }
+                }
+            })
+            // .params(req.body)
+            .toJson();
+
+        return res.json(list);
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/register", async function (req, res, next) {
+    try {
+        const projectCourseGenId = req.body.projectCourseGenId;
+        const projectType = req.body.projectType;
+        const projectId = req.body.projectId;
+        const description = help.get(req, "body.description", "");
+        const userId = req.body.userId || req.session.passport.user.id;
+        var sort = help.get(req, "body.sort", 0);
+
+        sort = !_.isNaN(help.getNumber(sort)) ? help.getNumber(sort) : 0;
+
+        if (projectCourseGenId === void 0)
+            return res.status(400).send("Require projectCourseGenId");
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+
+        var findTrainee = await Trainee.findOne({
+            where: {
+                projectId,
+                projectType,
+                userId,
+                projectCourseGenId
+            }
+        });
+
+        if (!findTrainee) {
+            if (projectCourseGenId != null) {
+                let file = _.get(req, "files.file");
+
+                // if (file == null) {
+                //     return res.send('Require file')
+                // }
+                if (!help.empty(file)) {
+                    let mediaId = await help.next("ml_media");
+                    let p = path.resolve(
+                        __dirname,
+                        "../../data/project/trainee/register",
+                        mediaId + "." + file.extension
+                    );
+                    // let p = path.resolve(__dirname, '../../data/project/trainee', traineeFind.id + '-' + (file.name).replace(`.${file.extension}`, '') + '.' + file.extension)
+                    shelljs.mkdir("-p", path.dirname(p));
+                    file.mv(p);
+                }
+
+                var trainee = await Trainee.create({
+                    projectCourseGenId,
+                    projectId,
+                    userId,
+                    sort,
+                    projectType,
+                    description,
+                    status: "pending",
+                    isOnline: "true",
+                    selected: "none"
+                });
+                if (!help.empty(file)) {
+                    await Media.create({
+                        extension: file.extension,
+                        type: "file",
+                        refId: trainee.id,
+                        refMenu: "trainee",
+                        mediaDetail: "register",
+                        size: bytes(file.size),
+                        filename: help.empty(req.input.filename) ?
+                            `${req.input.filename}.${file.extension}` : file.name.replace(`.${file.extension}`, "") +
+                            "." +
+                            file.extension
+                    });
+                }
+                return res.send("register Sucsecc");
+            }
+        } else {
+            return res
+                .status(400)
+                .send("You have repeat registered the course and gen of this project.");
+        }
+
+        res.send("OK");
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/list-status-screener", async function (req, res, next) {
+    //สถานะผู้คัดกรอง
+    try {
+        const projectCourseId = req.body.projectCourseId;
+        const projectId = req.body.projectId;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        if (projectCourseId === void 0)
+            return res.status(400).send("Require  projectCourseId");
+
+        if (projectId || projectCourseId) {
+            let find = await ProjectCourse.findOne({
+                where: {
+                    id: projectCourseId,
+                    projectId
+                }
+            });
+            if (!find)
+                return res.status(400).send("No have projectCourseId and projectId");
+        }
+
+        let findGroupId = await ProjectTaragetScreening.findOne({
+            where: {
+                groupId: "0" || 0,
+                projectCourseId
+            }
+        });
+
+        console.log(findGroupId);
+
+        if (findGroupId) {
+            var listStatus = await help
+                .query("ml_organization_group")
+                .select(["name"])
+                .where("isBrance", "true")
+                .hasOne("ml_project_target_qualification_screening", {
+                    foreignKey: "groupId",
+                    as: "OrgUser",
+                    required: false,
+                    except: ["createdAt", "updatedAt"],
+                    where: {
+                        projectCourseId: projectCourseId
+                    }
+                    // belongsTo: {
+                    //     ml_project_course: {
+                    //         foreignKey: "projectCourseId",
+                    //         as: "ProjectCourse",
+                    //         required: false,
+                    //         select: [],
+                    //     }
+                    // }
+                })
+                .toJson();
+        } else {
+            var listStatus = await help
+                .query("ml_organization_group")
+                .select(["name"])
+                .hasOne("ml_project_target_qualification_screening", {
+                    foreignKey: "groupId",
+                    as: "OrgUser",
+                    required: true,
+                    except: ["createdAt", "updatedAt"],
+                    belongsTo: {
+                        ml_project_course: {
+                            foreignKey: "projectCourseId",
+                            as: "ProjectCourse",
+                            required: true,
+                            select: [],
+                            where: {
+                                id: projectCourseId,
+                                projectId: projectId
+                            }
+                        }
+                    }
+                })
+                .toJson();
+        }
+
+        // for (var List of listStatus) {
+        //     List.id = List.OrgUser.id
+        //     List.projectCourseId = List.OrgUser.projectCourseId,
+
+        //     console.log(List.id);
+
+        // }
+
+        res.json(listStatus);
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/manage-trainee", async function (req, res, next) {
+    try {
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname;
+        const projectCourseGenId = req.body.projectCourseGenId;
+        const projectId = req.body.projectId;
+        const groupId = req.body.groupId;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        if (groupId === void 0) return res.status(400).send("Require groupId");
+        let projectIdFind = await Trainee.findOne({
+            where: {
+                projectId
+            }
+        });
+        if (!projectIdFind) {
+            return res.status(400).send("projectId is not exist");
+        }
+
+        // console.log(user);
+
+        var list = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("isOnline", "true")
+            .select([
+                "userId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description"
+            ]);
+        list.where("status", "pending").hasMany("ml_organization_user", {
+            foreignKey: "userId",
+            sourceKey: "userId",
+            as: "OrgUser",
+            required: false,
+            where: {
+                groupId: groupId
+            },
+            except: ["createdAt", "updatedAt"],
+            belongsTo: {
+                ml_organization_group: {
+                    foreignKey: "groupId",
+                    as: "group",
+                    require: true,
+                    select: ["id", "name", "code"],
+                }
+            }
+        });
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            list.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            list.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        list = await list.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"],
+            hasOne: [{
+                ml_organization_user: {
+                    foreignKey: "userId",
+                    as: "orgUser",
+                    required: false,
+                    select: ["groupId"],
+                    where: {
+                        isAdmin: "false"
+                    },
+                    belongsTo: {
+                        ml_organization_group: {
+                            foreignKey: "groupId",
+                            as: "group",
+                            require: false,
+                            select: ["id", "name", "code"]
+                        }
+                    }
+                }
+            }]
+        });
+        if (whereEmpCode || whereName || whereLastname) {
+            list.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        list = await list.toJson();
+
+        for (let trainee of list) {
+            if (trainee.userId) {
+                trainee.user = {
+                    ...trainee.user,
+                    ...(await User.getPosition(trainee.userId))
+                };
+
+                trainee.user.Group = 0;
+                trainee.user.team = 0;
+
+                let code = trainee.user.group.code;
+                var findIndexGroup = help.filter(_.split(code, "."))[1];
+                var findIndexTeam = help.filter(_.split(code, "."))[2];
+                if (findIndexGroup != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexGroup)
+                        .select(["name"])
+                        .first();
+                    trainee.user.Group = a.name;
+                } else if (findIndexGroup == undefined) {
+                    trainee.user.Group = '-'
+                }
+
+                if (findIndexTeam != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexTeam)
+                        .select(["name"])
+                        .first();
+                    trainee.user.team = a.name;
+                }
+
+                if (findIndexTeam === undefined) {
+                    trainee.user.team = "-";
+                }
+            }
+        }
+
+        var count = (
+            await seq.query(`SELECT
+                userId,
+                COUNT(*) AS count
+                FROM
+                ml_project_trainee
+                GROUP BY
+                userId
+                `)
+        )[0];
+
+        var limitedJoinProject = await help
+            .query("ml_project_config")
+            .select(["minPerYear"])
+            .toJson();
+
+        list.forEach(d => {
+            d.empCode = d.User.empCode;
+            d.name = d.User.name;
+            d.lastname = d.User.lastname;
+            d.group = _.result(d.user, "Group", "")
+            d.position = !help.empty(_.result(d.user, "position.name", "")) ?
+                _.result(d.user, "position.name", "") :
+                "-";
+            d.rank = !help.empty(_.result(d.user, "rank", "")) ?
+                _.result(d.user, "rank", "") :
+                "-";
+            d.team = _.result(d.user, "team", "");
+            d.numParticipants = count.find(c => c.userId == d.userId).count;
+            delete d.User;
+            delete d.user;
+            delete d.OrgUser;
+        });
+
+        return res.json({
+            list,
+            limitedJoinProject
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/select-status-target", async function (req, res, next) {
+    try {
+        const status = req.body.status;
+        const id = req.body.id;
+
+        await ProjectTaragetScreening.update({
+            status
+        }, {
+            where: {
+                id
+            }
+        });
+        res.send("OK");
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/manage-screenedWait", async function (req, res, next) {
+    try {
+        const whereEmpCode = req.body.whereEmpCode;
+        const whereName = req.body.whereName;
+        const whereLastname = req.body.whereLastname;
+        const projectCourseGenId = req.body.projectCourseGenId;
+        const projectId = req.body.projectId;
+        const groupId = req.body.groupId;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        if (groupId === void 0) return res.status(400).send("Require groupId");
+        let projectIdFind = await Trainee.findOne({
+            where: {
+                projectId
+            }
+        });
+        if (!projectIdFind) {
+            return res.status(400).send("projectId is not exist");
+        }
+
+        var list = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .where("status", ["screened", "approved"])
+            .select([
+                "userId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description",
+                "sort",
+                "reason"
+            ])
+            .hasMany("ml_organization_user", {
+                foreignKey: "userId",
+                sourceKey: "userId",
+                as: "OrgUser",
+                required: false,
+                where: {
+                    groupId: groupId
+                },
+                except: ["createdAt", "updatedAt"]
+            });
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            list.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            list.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+
+        list = await list.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"],
+            hasOne: [{
+                ml_organization_user: {
+                    foreignKey: "userId",
+                    as: "orgUser",
+                    required: false,
+                    select: ["groupId"],
+                    where: {
+                        isAdmin: "false",
+                        groupId: groupId
+                    },
+                    belongsTo: {
+                        ml_organization_group: {
+                            foreignKey: "groupId",
+                            as: "group",
+                            require: false,
+                            select: ["name"]
+                        }
+                    }
+                }
+            }]
+        });
+        if (whereEmpCode || whereName || whereLastname) {
+            list.paramsWhere({
+                "User.empCode": {
+                    $like: `${whereEmpCode}%`
+                },
+                "User.name": {
+                    $like: `${whereName}`
+                },
+                "User.lastname": {
+                    $like: `${whereLastname}`
+                }
+            });
+        }
+        list = await list.toJson();
+
+        for (let listOrg of list) {
+
+            if (listOrg.userId) {
+                listOrg.Org = {
+                    ...listOrg.Org,
+                    ...(await User.getPosition(listOrg.userId))
+                }
+
+                listOrg.Org.Group = 0;
+                listOrg.Org.team = 0;
+
+                let code = listOrg.Org.group.code;
+                var findIndexGroup = help.filter(_.split(code, "."))[1];
+                var findIndexTeam = help.filter(_.split(code, "."))[2];
+                if (findIndexGroup != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexGroup)
+                        .select(["name"])
+                        .first();
+                    listOrg.Org.Group = a.name;
+                } else if (findIndexGroup == undefined) {
+                    listOrg.Org.Group = '-'
+                }
+
+                if (findIndexTeam != undefined) {
+                    let a = await help
+                        .query("ml_organization_group")
+                        .where("id", findIndexTeam)
+                        .select(["name"])
+                        .first();
+                    listOrg.Org.team = a.name;
+                }
+
+                if (findIndexTeam === undefined) {
+                    listOrg.Org.team = "-";
+                }
+            }
+        }
+
+
+        var count = (
+            await seq.query(`SELECT
+                userId,
+                COUNT(*) AS count
+                FROM
+                ml_project_trainee
+                GROUP BY
+                userId
+                `)
+        )[0];
+
+        var limitedJoinProject = await help
+            .query("ml_project_config")
+            .select(["minPerYear"])
+            .toJson();
+
+        list.forEach(d => {
+            d.empCode = d.User.empCode;
+            d.name = d.User.name;
+            d.lastname = d.User.lastname;
+            d.group = _.result(d.Org, "Group", "");
+            d.position = !help.empty(_.result(d.Org, "position.name", "")) ?
+                _.result(d.Org, "position.name", "") :
+                "-";
+            d.rank = !help.empty(_.result(d.Org, "rank", "")) ?
+                _.result(d.Org, "rank", "") :
+                "-";
+            d.team = _.result(d.Org, "team", "");
+            d.numParticipants = count.find(c => c.userId == d.userId).count;
+            delete d.User;
+            delete d.Org;
+        });
+
+        return res.json({
+            list,
+            limitedJoinProject
+        });
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/approved-trainee-all", async function (req, res, next) {
+    try {
+        const projectId = req.body.projectId;
+        const projectCourseId = req._body("projectCourseId", Number);
+        const gen = req._body("gen", Number);
+        // const userId = help.reqJsonConverte(req.body.userId)
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        if (projectCourseId && gen != null) {
+            var findProjectCourseGen = await ProjectCourseGen.findOne({
+                where: {
+                    projectCourseId,
+                    gen
+                }
+            });
+            if (!findProjectCourseGen)
+                return res.status(400).send("No Information projectCourseId && gen ");
+        }
+        var taineeFind = await Trainee.findOne({
+            where: {
+                projectId,
+                projectCourseGenId: findProjectCourseGen.id,
+                selected: "real"
+            }
+        });
+        await Trainee.update({
+            status: "approved"
+        }, {
+            where: {
+                projectId,
+                projectCourseGenId: findProjectCourseGen.id,
+                selected: "real"
+            }
+        });
+        await projectController.sendNotify({
+            input: {
+                projectId: projectId,
+                projectCourseGenId: findProjectCourseGen.id,
+                userId: taineeFind.userId
+            }
+        });
+        return res.send("OK");
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/approved-manage-all", async function (req, res, next) {
+    try {
+        const projectId = req.body.projectId;
+        const projectCourseId = req._body("projectCourseId", Number);
+        const groupId = req.body.groupId;
+        const gen = req._body("gen", Number);
+        // const userId = help.reqJsonConverte(req.body.userId)
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+        if (groupId === void 0) return res.status(400).send("Require groupId");
+
+        await seq.query(`UPDATE
+        ml_project_trainee
+        INNER JOIN ml_organization_user ON ml_organization_user.userId = ml_project_trainee.userId
+        INNER JOIN ml_project_course_gen ON ml_project_trainee.projectCourseGenId = ml_project_course_gen.id
+        SET ml_project_trainee.\`status\`= 'approved'
+        WHERE ml_organization_user.groupId = ${groupId} AND ml_project_trainee.projectId = ${projectId}
+        AND ml_project_course_gen.projectCourseId = ${projectCourseId} AND ml_project_course_gen.gen = ${gen}
+        AND ml_project_trainee.selected = 'real'`);
+
+        return res.send("OK");
+    } catch (e) {
+        next(e);
+    }
+});
+
+router.all("/list-screener-csv", async function (req, res, next) {
+    try {
+        const projectId = req.body.projectId;
+        const projectCourseGenId = req.body.projectCourseGenId;
+
+        if (projectId === void 0) return res.status(400).send("Require projectId");
+
+        let projectIdFind = await Trainee.findOne({
+            where: {
+                projectId
+            }
+        });
+        if (!projectIdFind) {
+            return res.status(400).send("projectId is not exist");
+        }
+
+        var list = await help
+            .query("ml_project_trainee")
+            .where("projectId", projectId)
+            .select([
+                "userId",
+                "status",
+                "evaluationScore",
+                "isOnline",
+                "selected",
+                "description"
+            ])
+            .where("status", ["screened", "approved"])
+            .where("selected", "real");
+        if (!help.empty(req.input.projectCourseId) && !help.empty(req.input.gen)) {
+            list.belongsTo("ml_project_course_gen", {
+                foreignKey: "projectCourseGenId",
+                as: "gen",
+                required: true,
+                select: [],
+                where: help.only(req.input, ["projectCourseId", "gen"])
+            });
+        } else if (!help.empty(projectCourseGenId)) {
+            list.where("projectCourseGenId", req.input.projectCourseGenId);
+        }
+        list = await list.belongsTo("ml_user", {
+            foreignKey: "userId",
+            as: "User",
+            required: false,
+            select: ["empCode", "name", "lastname"],
+            hasMany: {
+                ml_organization_user: {
+                    foreignKey: "userId",
+                    as: "orgUser",
+                    required: false,
+                    select: ["positionId"],
+                    belongsTo: {
+                        ml_organization_position: {
+                            foreignKey: "positionId",
+                            as: "orgPosition",
+                            required: false,
+                            select: ["name"]
+                        }
+                    }
+                }
+            }
+        });
+        list = await list.toJson();
+
+        list.forEach(d => {
+            d["ชื่อ"] = d.User.name;
+            d["นามสกุล"] = d.User.lastname;
+            d["ตำแหน่ง"] = !help.empty(_.result(d.User.orgUser[0], "orgPosition.name", "")) ? _.result(d.User.orgUser[0], "orgPosition.name", "") : "-";
+            d["รายละเอียด"] = !help.empty(d.description) ? d.description : "-";
+            delete d.User;
+            delete d.userId;
+            delete d.status;
+            delete d.evaluationScore;
+            delete d.isOnline;
+            delete d.selected;
+            delete d.description;
+        });
+
+        const parser = new Parser({
+            delimiter: "\t"
+        });
+        const csv = parser.parse(list);
+        res.setHeader("Content-Type", "text/csv");
+        return res.send(iconv.encode(csv, "UTF-16"));
+    } catch (e) {
+        next(e);
+    }
+});
+
+module.exports = router;

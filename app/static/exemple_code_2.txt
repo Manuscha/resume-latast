@@ -1,0 +1,298 @@
+<template>
+  <v-row align="start" class="px-2">
+    <template v-if="user">
+      <v-col class="pl-3 hidden-lg-and-up" justify="end" cols="12">
+        <v-card class="card">
+          <div class="avatar">
+            <v-img
+              :alt="`${user.name} ${user.lastname}`"
+              :src="user.avatarUrl"
+              class="ma-auto"
+              width="180"
+              height="180"
+              style="border-radius: 50%; background-color: grey"
+              v-on:error="user.avatarUrl = `/images/account.svg`"
+            />
+          </div>
+          <v-card-text align="center" justify="center">
+            <p class="font-weight-black subtitle-1">
+              <span></span>
+              <span></span>
+              <span></span>
+            </p>
+            <!-- <v-btn
+              block
+              color="primary"
+              dark
+              to="/reset_password?r=/users/me/profile"
+            >{{$t('เปลี่ยนรหัสผ่าน')}}</v-btn>-->
+          </v-card-text>
+        </v-card>
+      </v-col>
+
+      <v-col lg="8" xl="9" md="12" sm="12" class="pr-3">
+        <v-row style="height: 75px" class="hidden-md-and-down"></v-row>
+        <base-material-card color="primary" class="px-4 py-3 mx-auto">
+          <template v-slot:image>
+            <div style="padding: 28px">
+              <img src="/images/account.svg" width="32" height="32" />
+            </div>
+          </template>
+          <template v-slot:after-heading>
+            <div class="display-1 mt-2 font-weight-bold">
+              {{ $t("PDRfr3us") }}
+            </div>
+          </template>
+          <v-card-text>
+            <v-row class="px-0">
+              <v-col cols="12" md="6">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1"
+                  >{{ $t("name") }}</v-list-item-subtitle
+                >
+                <v-banner single-line>
+                  <span class="font-weight-black" v-text="user.name"></span>
+                </v-banner>
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1"
+                  >{{ $t("lastname") }}</v-list-item-subtitle
+                >
+                <v-banner single-line>
+                  <span class="font-weight-black" v-text="user.lastname"></span>
+                </v-banner>
+              </v-col>
+            </v-row>
+            <v-row>
+              <v-col cols="12" class="py-0">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1 pr-2"
+                  >{{ $t("email") }}</v-list-item-subtitle
+                >
+                <v-banner single-line>
+                  <span class="font-weight-black" v-text="user.email"></span>
+                </v-banner>
+              </v-col>
+            </v-row>
+            <v-row class="px-0">
+              <v-col cols="12" md="6">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1 pr-2"
+                  >{{ $t("เบอร์โทรศัพท์") }}</v-list-item-subtitle
+                >
+                <v-banner single-line class="pr-2">
+                  <span
+                    class="font-weight-black"
+                    v-text="phoneFormat(user.tel)"
+                  ></span>
+                </v-banner>
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1"
+                  >{{ $t("วัน-เดือน-ปีเกิด") }}</v-list-item-subtitle
+                >
+                <v-banner single-line>
+                  <span class="font-weight-black">{{
+                    user.birthDate
+                      ? moment(user.birthDate)
+                          .format("DD MM YYYY")
+                          .replace(/ /g, "-")
+                      : "-"
+                  }}</span>
+                </v-banner>
+              </v-col>
+            </v-row>
+            <v-row class="px-0">
+              <v-col cols="12">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1"
+                  >{{ $t("ตำแหน่ง") }}</v-list-item-subtitle
+                >
+                <!-- <v-banner v-if="!empty(user.position) && empty(user.teacher_education)" single-line>
+                  <span class="font-weight-black">{{user.position.name}}</span>
+                </v-banner>
+                <v-banner
+                  v-if="!empty(user.teacher_education) &&  empty(user.position)"
+                  single-line
+                >
+                  <span
+                    class="font-weight-black"
+                  >ครูสอนระดับ{{user.teacher_education.EDUCATION_LEVEL_NAME}}</span>
+                </v-banner>
+                <v-banner v-else-if="!empty(user.position) &&!empty(user.teacher_education)">
+                  <span>{{user.position.name}} และ ครูสอนระดับ{{user.teacher_education.EDUCATION_LEVEL_NAME}}</span>
+                </v-banner>
+                <v-banner
+                  v-else-if="empty(user.position) && empty(user.teacher_education)"
+                  single-line
+                ></v-banner>-->
+                <v-banner single-line class="pr-2">
+                  <span
+                    class="font-weight-black"
+                    v-text="user.position_name"
+                  ></span>
+                </v-banner>
+                <span class="caption" style="color: darkgray"
+                  >แก้ไขข้อมูลเมื่อวันที่
+                  {{
+                    user.updatedAt
+                      ? moment(user.updatedAt)
+                          .format("DD MM YYYY")
+                          .replace(/ /g, "-")
+                      : "-"
+                  }}</span
+                >
+              </v-col>
+              <!-- <v-col cols="12" md="6">
+                <v-list-item-subtitle class="grey--text text--darken-1 subtitle-1">{{$t('ชั้นปี')}}</v-list-item-subtitle>
+                <v-banner single-line>{{$t("ประถมศึกษาตอนปลาย")}}</v-banner>
+              </v-col>-->
+            </v-row>
+            <!-- <v-row class="px-0">
+              <v-col cols="12">
+                <v-list-item-subtitle
+                  class="grey--text text--darken-1 subtitle-1"
+                >{{$t('ต้นสังกัด')}}</v-list-item-subtitle>
+                <v-banner single-line>อนุบาลสามเสน</v-banner>
+              </v-col>
+            </v-row>-->
+            <!-- <v-row class="px-0" v-show="user.userType == 'ครู' || !empty(user.teacher_education)"> -->
+            <v-row class="px-0">
+              <v-col>
+                <v-row v-for="(item, i) in user.userTeaching" :key="i">
+                  <v-col cols="12" md="6">
+                    <v-list-item-subtitle
+                      class="grey--text text--darken-1 subtitle-1"
+                      >{{ $t("วิชาที่สอน") }}</v-list-item-subtitle
+                    >
+                    <!-- <v-text-field class="pa-0"></v-text-field> -->
+                    <v-banner single-line>
+                      <span class="font-weight-black">{{
+                        item.subjectTeachingCode
+                      }}</span>
+                    </v-banner>
+                  </v-col>
+                  <v-col cols="12" md="6">
+                    <v-list-item-subtitle
+                      class="grey--text text--darken-1 subtitle-1"
+                      >{{ $t("สอนชั้น") }}</v-list-item-subtitle
+                    >
+                    <!-- <v-text-field class="pa-0"></v-text-field> -->
+                    <v-banner single-line>
+                      <span class="font-weight-black">{{
+                        item.GradeTeachingCode
+                      }}</span>
+                    </v-banner>
+                  </v-col>
+                </v-row>
+              </v-col>
+            </v-row>
+            <!-- <v-row class="pt-4" v-show="user.userType == 'ครู' || !empty(user.teacher_education)"> -->
+            <v-row class="pt-4">
+              <v-row align="center" justify="end">
+                <v-btn
+                  color="secondary"
+                  class="hidden-md-and-down"
+                  :to="editProfileUrl"
+                  >{{ $t("เปลี่ยนแปลงข้อมูล") }}</v-btn
+                >
+                <v-btn
+                  block
+                  color="secondary"
+                  dark
+                  class="hidden-lg-and-up"
+                  :to="editProfileUrl"
+                  >{{ $t("เปลี่ยนแปลงข้อมูล") }}</v-btn
+                >
+              </v-row>
+            </v-row>
+          </v-card-text>
+        </base-material-card>
+      </v-col>
+
+      <v-col class="pl-3 hidden-md-and-down" justify="end">
+        <v-card class="card">
+          <div class="avatar">
+            <v-img
+              :alt="`${user.name} ${user.lastname}`"
+              :src="user.avatarUrl"
+              class="ma-auto"
+              width="180"
+              height="180"
+              style="border-radius: 50%; background-color: grey"
+              v-on:error="user.avatarUrl = `/images/account.svg`"
+            />
+          </div>
+          <v-card-text align="center" justify="center">
+            <p class="font-weight-black subtitle-1">
+              <span></span>
+              <span></span>
+              <span></span>
+            </p>
+            <!-- <v-btn
+              color="primary"
+              to="/reset_password?r=/users/me/profile"
+              class="mx-0"
+            >{{$t('เปลี่ยนรหัสผ่าน')}}</v-btn>-->
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </template>
+    <template v-else></template>
+  </v-row>
+</template>
+
+<script>
+import { mapState } from "vuex";
+import axios from "../utils/axios";
+var moment = require("moment");
+
+export default {
+  props: {
+    editProfileUrl: {
+      type: String,
+    },
+  },
+  data() {
+    return {
+      user: null,
+    };
+  },
+  async mounted() {
+    let r = await axios.get(
+      "/api/users/me?access_token=" + localStorage.getItem("accessToken")
+    );
+    this.user = r.data;
+  },
+  methods: {
+    empty(mixed_var) {
+      if (!mixed_var || mixed_var == "0") {
+        return true;
+      }
+      if (typeof mixed_var == "object") {
+        for (var k in mixed_var) {
+          return false;
+        }
+        return true;
+      }
+      return false;
+    },
+  },
+};
+</script>
+
+<style lang="scss" scoped>
+.card {
+  // position: relative;
+  margin-top: 105px;
+}
+
+.avatar {
+  top: -90px;
+  height: 90px;
+  position: relative;
+  text-align: center;
+}
+</style>
